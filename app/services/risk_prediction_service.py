@@ -1,8 +1,8 @@
-"""Servicio de inferencia del Random Forest — Predicción de Riesgo (CU10).
+"""Servicio de inferencia del Random Forest - Prediccion de Riesgo (CU10).
 
-Carga el modelo y el scaler (vía ``model_loader``), construye el vector de
-features en el orden de entrenamiento, ejecuta ``predict_proba`` y traduce el
-resultado a un nivel de riesgo textual con factores críticos y recomendación.
+Carga el modelo y el scaler, construye el vector de features en el orden de
+entrenamiento, ejecuta ``predict_proba`` y traduce el resultado a un nivel de
+riesgo textual con factores clinicos activos y recomendacion.
 """
 
 import numpy as np
@@ -10,9 +10,8 @@ import numpy as np
 from app.core.exceptions import InsufficientDataError, ModelNotLoadedError
 from app.schemas.common import RISK_LABELS
 from app.schemas.risk_prediction import RiskPredictionRequest, RiskPredictionResponse
-from app.services.model_loader import get_rf_importances, get_rf_model, get_rf_scaler
+from app.services.model_loader import get_rf_model, get_rf_scaler
 
-# Orden EXACTO de features con el que se entrenó el modelo
 FEATURES_ORDER = [
     "edad",
     "sexo",
@@ -26,64 +25,111 @@ FEATURES_ORDER = [
     "num_comorbilidades",
 ]
 
-FEATURE_DESCRIPTIONS = {
-    "imc": "Índice de Masa Corporal elevado",
-    "porcentaje_grasa": "Porcentaje de grasa corporal fuera de rango",
-    "variacion_peso_3m_kg": "Variación de peso significativa en los últimos 3 meses",
-    "num_comorbilidades": "Presencia de comorbilidades registradas",
-    "calidad_dieta_score": "Calidad de la dieta por debajo del promedio",
-    "nivel_actividad": "Nivel de actividad física insuficiente",
-    "edad": "Edad como factor de riesgo",
-    "peso_kg": "Peso corporal fuera de rango saludable",
-}
+
+def _add_factor(
+    factors: list[tuple[str, float]],
+    description: str,
+    severity: float,
+) -> None:
+    if severity > 0:
+        factors.append((description, severity))
 
 
-def _identify_critical_factors(features: dict, importances: dict) -> list[str]:
-    """Top 3 factores legibles según la importancia global del modelo.
+def _identify_critical_factors(features: dict) -> list[str]:
+    """Devuelve solo factores justificados por valores reales del paciente."""
+    factors: list[tuple[str, float]] = []
 
-    Garantiza siempre al menos un factor para satisfacer la exigencia clínica de
-    explicabilidad.
-    """
-    factors: list[str] = []
-    ranked = sorted(importances.items(), key=lambda x: x[1], reverse=True)
+    imc = features.get("imc")
+    if imc is not None:
+        _add_factor(
+            factors,
+            "Indice de Masa Corporal elevado",
+            max(0.0, (float(imc) - 25) / 10),
+        )
+        _add_factor(
+            factors,
+            "Indice de Masa Corporal por debajo del rango saludable",
+            max(0.0, (18.5 - float(imc)) / 4),
+        )
 
-    for feat_name, _ in ranked:
-        desc = FEATURE_DESCRIPTIONS.get(feat_name)
-        if desc and feat_name in features and desc not in factors:
-            factors.append(desc)
-        if len(factors) == 3:
-            break
+    porcentaje_grasa = features.get("porcentaje_grasa")
+    sexo = features.get("sexo")
+    if porcentaje_grasa is not None:
+        threshold = 32 if sexo == 0 else 25
+        _add_factor(
+            factors,
+            "Porcentaje de grasa corporal fuera de rango",
+            max(0.0, (float(porcentaje_grasa) - threshold) / 10),
+        )
 
-    if not factors:
-        factors.append("Perfil clínico general del paciente")
-    return factors
+    variacion_peso = features.get("variacion_peso_3m_kg")
+    if variacion_peso is not None:
+        _add_factor(
+            factors,
+            "Variacion de peso significativa en los ultimos 3 meses",
+            max(0.0, (abs(float(variacion_peso)) - 3) / 5),
+        )
+
+    comorbilidades = features.get("num_comorbilidades")
+    if comorbilidades is not None:
+        _add_factor(
+            factors,
+            "Presencia de comorbilidades registradas",
+            float(comorbilidades) / 2,
+        )
+
+    calidad_dieta = features.get("calidad_dieta_score")
+    if calidad_dieta is not None:
+        _add_factor(
+            factors,
+            "Calidad de la dieta por debajo del promedio",
+            max(0.0, (6 - float(calidad_dieta)) / 3),
+        )
+
+    actividad = features.get("nivel_actividad")
+    if actividad is not None:
+        _add_factor(
+            factors,
+            "Nivel de actividad fisica insuficiente",
+            max(0.0, (2 - float(actividad)) / 2),
+        )
+
+    edad = features.get("edad")
+    if edad is not None:
+        _add_factor(
+            factors,
+            "Edad como factor de seguimiento preventivo",
+            max(0.0, (float(edad) - 60) / 20),
+        )
+
+    ranked = sorted(factors, key=lambda item: item[1], reverse=True)
+    active = [description for description, _ in ranked[:3]]
+    return active or ["Perfil clinico general del paciente"]
 
 
 def _generate_recommendation(level: int) -> str:
     base = {
-        0: "Mantener hábitos actuales y continuar monitoreo preventivo trimestral.",
-        1: "Se recomienda ajuste de plan dietético y seguimiento mensual de métricas.",
+        0: "Mantener habitos actuales y continuar monitoreo preventivo trimestral.",
+        1: "Se recomienda ajuste de plan dietetico y seguimiento mensual de metricas.",
         2: (
-            "Atención prioritaria requerida. Revisar plan de alimentación y "
-            "considerar interconsulta médica."
+            "Atencion prioritaria requerida. Revisar plan de alimentacion y "
+            "considerar interconsulta medica."
         ),
     }
     return base[level]
 
 
 class RiskPredictionService:
-    MIN_REQUIRED_FEATURES = 7  # Mínimo de features no nulas para habilitar predicción
+    MIN_REQUIRED_FEATURES = 7
 
     def predict(self, request: RiskPredictionRequest) -> RiskPredictionResponse:
         features_dict = request.features.model_dump()
 
-        # Validación de datos mínimos
         non_null = sum(1 for v in features_dict.values() if v is not None)
         if non_null < self.MIN_REQUIRED_FEATURES:
             missing = [k for k, v in features_dict.items() if v is None]
             raise InsufficientDataError(missing_fields=missing)
 
-        # Calcular IMC si no viene provisto pero hay peso y talla
         if (
             features_dict.get("imc") is None
             and features_dict.get("peso_kg")
@@ -93,26 +139,25 @@ class RiskPredictionService:
                 features_dict["talla_m"] ** 2
             )
 
-        # Vector en el orden del entrenamiento (los None se imputan a 0.0)
         vector = np.array(
             [features_dict.get(f) or 0.0 for f in FEATURES_ORDER],
             dtype=np.float64,
         ).reshape(1, -1)
 
-        # ModelNotLoadedError se propaga y lo mapea el handler global a 503
         model = get_rf_model()
         scaler = get_rf_scaler()
-        importances = get_rf_importances()
 
         vector_scaled = scaler.transform(vector)
         probabilities = model.predict_proba(vector_scaled)[0]
         predicted_class = int(np.argmax(probabilities))
 
-        factores = _identify_critical_factors(features_dict, importances)
+        factores = _identify_critical_factors(features_dict)
 
-        # Mapear probabilidades a etiquetas según las clases conocidas del modelo
         classes = list(getattr(model, "classes_", [0, 1, 2]))
-        prob_map = {RISK_LABELS[int(c)]: float(probabilities[i]) for i, c in enumerate(classes)}
+        prob_map = {
+            RISK_LABELS[int(c)]: float(probabilities[i])
+            for i, c in enumerate(classes)
+        }
         for label in RISK_LABELS.values():
             prob_map.setdefault(label, 0.0)
 
@@ -125,5 +170,4 @@ class RiskPredictionService:
         )
 
 
-# Re-exportar para compatibilidad con imports desde el endpoint
 __all__ = ["RiskPredictionService", "InsufficientDataError", "ModelNotLoadedError"]
