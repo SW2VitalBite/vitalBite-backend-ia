@@ -1,0 +1,2 @@
+# Los artefactos (.pkl, .h5) se generan con los scripts de entrenamiento y
+# se excluyen de git (ver .gitignore). Este archivo conserva el directorio.

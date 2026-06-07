@@ -1,0 +1,43 @@
+# Git y entorno local
+.git/
+.github/
+
+# Python / venv
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Datos y artefactos ML (generar con scripts/seed_models.sh o montar volumen)
+data/
+app/models/artifacts/*.pkl
+app/models/artifacts/*.h5
+app/models/artifacts/*.keras
+app/models/artifacts/*.pt
+app/models/artifacts/*.joblib
+app/models/artifacts/food_class_names.json
+
+# Desarrollo (no van en imagen de producción)
+tests/
+docs/
+scripts/
+pytest.ini
+requirements-dev.txt
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+Thumbs.db
+.DS_Store

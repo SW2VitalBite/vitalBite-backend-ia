@@ -1,5 +1,30 @@
+# === Framework ===
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic>=2.9.0
 pydantic-settings>=2.6.0
 python-multipart>=0.0.12
+
+# === Machine Learning (CU10 Random Forest / CU11 K-means) ===
+scikit-learn>=1.5.0
+joblib>=1.4.0
+numpy>=1.26.0
+pandas>=2.2.0
+
+# === HTTP Client (comunicación interna con Core NestJS) ===
+httpx>=0.27.0
+
+# === Procesamiento de imagen (validación en endpoint food-scan) ===
+Pillow>=10.4.0
+
+# === Deep Learning (CU9 — clasificación de platos, modo "plate") ===
+# TensorFlow >=2.20 tiene ruedas para Python 3.13. En Windows nativo corre en
+# CPU (la GPU requiere WSL2). El servicio importa TF de forma perezosa y
+# devuelve 503 si el artefacto food_classifier.h5 no existe.
+tensorflow>=2.20.0
+
+# === OCR (CU9 — etiquetas nutricionales, modo "label") ===
+# Habilitan el modo "label". easyocr arrastra PyTorch (descarga modelos en la 1ª
+# ejecución). Funciona en CPU; en Windows nativo no usa GPU.
+opencv-python-headless>=4.10.0
+easyocr>=1.7.0

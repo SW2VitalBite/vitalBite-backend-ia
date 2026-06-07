@@ -1,0 +1,22 @@
+services:
+  vitalbite-ia:
+    build:
+      context: .
+      target: production
+    container_name: vitalbite-ia
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./app:/app/app                                   # Hot-reload del código
+      - ./app/models/artifacts:/app/app/models/artifacts  # Artefactos ML persistentes
+    environment:
+      - DEBUG=true
+      - CORE_SERVICE_URL=http://host.docker.internal:3000
+      - CORE_GRAPHQL_URL=http://host.docker.internal:3000/graphql
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

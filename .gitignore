@@ -28,29 +28,59 @@ env/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 .env.local
 
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 
 # Testing
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+.tox/
+.nox/
 .mypy_cache/
 .ruff_cache/
 
-# ML models & data
+# ML models & data (artefactos serializados, archivos grandes)
+app/models/artifacts/*.pkl
+app/models/artifacts/*.h5
+app/models/artifacts/*.keras
+app/models/artifacts/*.pt
+app/models/artifacts/*.joblib
+app/models/artifacts/food_class_names.json
 models/*.pkl
 models/*.h5
 models/*.pt
-data/raw/
-data/processed/
+data/
 *.onnx
+*.safetensors
+*.hdf5
+*.pb
+*.tflite
+
+# ML experiment tracking
+wandb/
+mlruns/
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Python version managers
+.python-version
