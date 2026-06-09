@@ -7,6 +7,7 @@ de entrada que no dependen del modelo.
 
 import pytest
 
+from app.services.risk_prediction_service import _identify_critical_factors
 from app.services.model_loader import models_status
 
 MODEL_AVAILABLE = models_status()["random_forest"]
@@ -74,6 +75,43 @@ def test_sin_api_key_retorna_403(client):
     payload = {**BASE, "features": _features()}
     resp = client.post("/api/v1/risk-prediction", json=payload)
     assert resp.status_code in (401, 403)  # no autorizado (API Key ausente)
+
+
+def test_factores_criticos_ignoran_valores_saludables():
+    factors = _identify_critical_factors(
+        _features(
+            edad=25,
+            imc=21,
+            peso_kg=64,
+            porcentaje_grasa=15,
+            calidad_dieta_score=9,
+            num_comorbilidades=0,
+            nivel_actividad=4,
+            variacion_peso_3m_kg=0,
+        )
+    )
+
+    assert factors == ["Perfil clinico general del paciente"]
+    assert "Presencia de comorbilidades registradas" not in factors
+    assert "Nivel de actividad fisica insuficiente" not in factors
+    assert "Calidad de la dieta por debajo del promedio" not in factors
+
+
+def test_factores_criticos_reflejan_valores_de_riesgo():
+    factors = _identify_critical_factors(
+        _features(
+            imc=35,
+            porcentaje_grasa=40,
+            calidad_dieta_score=5,
+            num_comorbilidades=3,
+            nivel_actividad=0,
+            variacion_peso_3m_kg=7,
+        )
+    )
+
+    assert "Presencia de comorbilidades registradas" in factors
+    assert "Indice de Masa Corporal elevado" in factors
+    assert len(factors) == 3
 
 
 @requires_model
