@@ -1,0 +1,44 @@
+# Contexto subido a Cloud Build con `gcloud run deploy --source .`.
+# OJO: si este archivo existe, gcloud NO hereda .gitignore — todo lo que NO esté
+# aquí se sube. Los artefactos ML (app/models/artifacts/) se suben a propósito.
+
+# Git / CI
+.git/
+.github/
+
+# Entornos virtuales (pesan GB — nunca subir)
+.venv/
+venv/
+ENV/
+env/
+
+# Caches Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Secretos (el Dockerfile copia .env.example → .env)
+.env
+.env.local
+
+# Datasets crudos
+data/
+
+# Desarrollo (no necesarios para construir la imagen)
+tests/
+docs/
+scripts/
+requirements-dev.txt
+pytest.ini
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+Thumbs.db
+.DS_Store

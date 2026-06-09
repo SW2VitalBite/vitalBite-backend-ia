@@ -19,14 +19,10 @@ coverage.xml
 .env.*
 !.env.example
 
-# Datos y artefactos ML (generar con scripts/seed_models.sh o montar volumen)
+# Datasets crudos: nunca van en la imagen (pueden ser enormes)
 data/
-app/models/artifacts/*.pkl
-app/models/artifacts/*.h5
-app/models/artifacts/*.keras
-app/models/artifacts/*.pt
-app/models/artifacts/*.joblib
-app/models/artifacts/food_class_names.json
+# NOTA: los artefactos ML (app/models/artifacts/*.pkl|*.h5|*.json) SÍ se hornean
+# en la imagen para que Cloud Run sirva los endpoints de IA sin descargas externas.
 
 # Desarrollo (no van en imagen de producción)
 tests/

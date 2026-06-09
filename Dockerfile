@@ -36,9 +36,14 @@ COPY --from=builder /install/packages /usr/local
 COPY app/ ./app/
 COPY .env.example ./.env
 
-EXPOSE 8001
+# Cloud Run inyecta la variable PORT (8080 por defecto). En local cae a 8001.
+EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:8001/api/v1/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8001}/api/v1/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "2"]
+# Forma shell con `exec` para que: (1) ${PORT} se expanda en runtime y (2) uvicorn
+# herede el PID 1 y reciba SIGTERM de Cloud Run para un apagado limpio.
+# WEB_CONCURRENCY=1 por defecto: cada worker carga la CNN en RAM; en Cloud Run se
+# escala por instancias, no por workers (evita OOM). Override con WEB_CONCURRENCY.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001} --workers ${WEB_CONCURRENCY:-1}"]

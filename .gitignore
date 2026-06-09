@@ -50,22 +50,17 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# ML models & data (artefactos serializados, archivos grandes)
-app/models/artifacts/*.pkl
-app/models/artifacts/*.h5
-app/models/artifacts/*.keras
-app/models/artifacts/*.pt
-app/models/artifacts/*.joblib
-app/models/artifacts/food_class_names.json
-models/*.pkl
-models/*.h5
-models/*.pt
+# Datos crudos y formatos de modelo pesados (NO versionar)
 data/
 *.onnx
 *.safetensors
 *.hdf5
 *.pb
 *.tflite
+
+# NOTA: los artefactos de inferencia en app/models/artifacts/ (*.pkl, *.h5,
+# food_class_names.json) SÍ se versionan a propósito: Cloud Run los hornea en la
+# imagen. Pesan ~30 MB en total, dentro del límite de GitHub.
 
 # ML experiment tracking
 wandb/

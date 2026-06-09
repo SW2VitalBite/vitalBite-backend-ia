@@ -1,0 +1,57 @@
+# CI/CD: build de la imagen + deploy a Cloud Run en cada push a GitHub.
+# Lo dispara un trigger de Cloud Build conectado al repo (rama main).
+substitutions:
+  _REGION: us-central1
+  _SERVICE: vitalbite-ia
+  _REPO: cloud-run-source-deploy   # Artifact Registry creado por el primer deploy
+
+steps:
+  # 1) Construir la imagen (los artefactos ML están versionados → se hornean)
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build
+    args:
+      - build
+      - -t
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA'
+      - -t
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest'
+      - .
+
+  # 2) Publicar la imagen en Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push
+    args:
+      - push
+      - --all-tags
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}'
+
+  # 3) Desplegar la nueva revisión a Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - '${_SERVICE}'
+      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=4Gi'
+      - '--cpu=2'
+      - '--port=8080'
+      - '--timeout=300'
+      - '--cpu-boost'
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest'
+
+options:
+  # Build pesado (TF + EasyOCR/torch): máquina rápida y logs solo a Cloud Logging
+  # (evita exigir un bucket de logs cuando se usa el SA de Compute).
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+# El build de la imagen tarda ~15 min; el default de 10 min no alcanza.
+timeout: 1800s
