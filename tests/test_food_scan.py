@@ -64,33 +64,29 @@ def test_formato_invalido_retorna_422(client, auth_headers):
 
 # --- Lógica del semáforo (unitario, sin modelos) -----------------------------
 
-def test_semaforo_riesgo_por_alergeno():
-    nutrients = NutrientInfo(ingredientes=["harina", "maní", "azúcar"])
-    semaforo, advertencias = evaluate_semaforo(
-        nutrients, [], {"alergias": ["maní"]}
-    )
+def test_semaforo_riesgo_por_multiples_banderas():
+    nutrients = NutrientInfo(sodio_mg=800, azucares_g=30)
+    semaforo, advertencias = evaluate_semaforo(nutrients, [])
     assert semaforo == Semaforo.RIESGO
-    assert any("alérgeno" in a for a in advertencias)
+    assert len(advertencias) >= 2
 
 
 def test_semaforo_seguro_sin_problemas():
     nutrients = NutrientInfo(calorias=120, proteinas_g=10, ingredientes=["lechuga", "tomate"])
-    semaforo, advertencias = evaluate_semaforo(nutrients, ["ensalada"], {})
+    semaforo, advertencias = evaluate_semaforo(nutrients, ["ensalada"])
     assert semaforo == Semaforo.SEGURO
     assert advertencias == []
 
 
 def test_semaforo_precaucion_por_sodio_alto():
     nutrients = NutrientInfo(sodio_mg=800)
-    semaforo, advertencias = evaluate_semaforo(nutrients, [], {})
+    semaforo, advertencias = evaluate_semaforo(nutrients, [])
     assert semaforo == Semaforo.PRECAUCION
     assert any("sodio" in a.lower() for a in advertencias)
 
 
 def test_semaforo_precaucion_por_categoria_riesgo():
-    semaforo, advertencias = evaluate_semaforo(
-        NutrientInfo(), ["comida_rapida"], {}
-    )
+    semaforo, advertencias = evaluate_semaforo(NutrientInfo(), ["comida_rapida"])
     assert semaforo == Semaforo.PRECAUCION
 
 

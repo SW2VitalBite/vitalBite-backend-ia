@@ -1,7 +1,16 @@
 """Servicio OCR para etiquetas nutricionales (CU9, modo ``label``).
 
-Pipeline: preprocesar imagen (CLAHE + umbralización adaptativa) → extraer texto
-con EasyOCR → parsear nutrientes con regex → calcular confianza.
+Pipeline: preprocesar imagen (escalado + CLAHE) → extraer texto **con su
+geometría** usando EasyOCR → agrupar los bloques en filas visuales → parsear los
+nutrientes por fila con regex → calcular confianza.
+
+Clave de precisión: las etiquetas nutricionales son **tablas**. La etiqueta
+("Sodio") y su valor ("120 mg") casi siempre están en la misma fila visual pero
+en bloques OCR distintos. Por eso NO aplanamos todo el texto en una sola cadena
+(eso mezcla el número de un nutriente con la etiqueta de otro): primero
+reconstruimos las filas a partir de las coordenadas ``y`` de cada bloque y
+buscamos cada nutriente dentro de su fila. El texto completo queda solo como
+respaldo.
 
 Las dependencias pesadas (``cv2``, ``easyocr``, ``numpy``) se importan de forma
 perezosa dentro de las funciones para que el microservicio arranque aunque no
@@ -16,16 +25,19 @@ from app.schemas.food_scan import NutrientInfo
 
 logger = get_logger("ocr")
 
-# Mapea el campo del schema → patrón regex de búsqueda en el texto OCR
+# Mapea el campo del schema → patrón regex (palabra clave + primer número).
+# Importa el orden: ``grasas_saturadas_g`` se evalúa antes que ``grasas_totales_g``
+# para que "Grasas saturadas" no sea capturado como grasa total.
+_NUM = r"(\d+(?:[.,]\d+)?)"
 PATTERNS = {
-    "calorias": r"(?:cal(?:or[ií]as?)?|energ[ií]a|energy|kcal)[^\d]*(\d+(?:[.,]\d+)?)",
-    "carbohidratos_g": r"(?:carbohidrat(?:os?)?|carbohydrate)[^\d]*(\d+(?:[.,]\d+)?)",
-    "proteinas_g": r"(?:prote[íi]nas?|protein)[^\d]*(\d+(?:[.,]\d+)?)",
-    "grasas_totales_g": r"(?:grasa[s]? total(?:es)?|total fat|l[íi]pidos)[^\d]*(\d+(?:[.,]\d+)?)",
-    "grasas_saturadas_g": r"(?:grasa[s]? saturada[s]?|saturated fat)[^\d]*(\d+(?:[.,]\d+)?)",
-    "sodio_mg": r"(?:sodio|sodium)[^\d]*(\d+(?:[.,]\d+)?)",
-    "azucares_g": r"(?:az[úu]cares?|sugars?)[^\d]*(\d+(?:[.,]\d+)?)",
-    "fibra_g": r"(?:fibra|fiber|fibre)[^\d]*(\d+(?:[.,]\d+)?)",
+    "calorias": r"(?:valor\s+energ[eé]tico|energ[ií]a|calor[ií]as?|energy|kcal)[^\d]*" + _NUM,
+    "carbohidratos_g": r"(?:carbohidratos?(?:\s+totales)?|hidratos\s+de\s+carbono|carbohydrate)[^\d]*" + _NUM,
+    "proteinas_g": r"(?:prote[íi]nas?|protein)[^\d]*" + _NUM,
+    "grasas_saturadas_g": r"(?:saturad\w*|saturated)[^\d]*" + _NUM,
+    "grasas_totales_g": r"(?:grasas?(?:\s*totales)?|grasa\s+total|total\s+fat|l[íi]pidos)[^\d]*" + _NUM,
+    "sodio_mg": r"(?:sodio|sodium)[^\d]*" + _NUM,
+    "azucares_g": r"(?:az[úu]cares?|sugars?)[^\d]*" + _NUM,
+    "fibra_g": r"(?:fibra|fiber|fibre)[^\d]*" + _NUM,
 }
 
 # Cache del lector EasyOCR (su inicialización es costosa)
@@ -50,7 +62,12 @@ def _get_reader():
 
 
 def preprocess_for_ocr(image):
-    """Mejora la legibilidad de la etiqueta antes del OCR (CLAHE + threshold)."""
+    """Realza la etiqueta antes del OCR: escalado + contraste local (CLAHE).
+
+    A diferencia de un umbral binario duro, CLAHE conserva la forma de los
+    trazos, que es lo que mejor lee el reconocedor neuronal de EasyOCR. El
+    escalado ayuda a leer los números pequeños de la tabla.
+    """
     try:
         import cv2
         import numpy as np
@@ -62,37 +79,117 @@ def preprocess_for_ocr(image):
     img_array = np.array(image.convert("RGB"))
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
 
+    # Escalar imágenes pequeñas (números de la tabla quedan más legibles)
+    h, w = gray.shape[:2]
+    longest = max(h, w)
+    if longest < 1400:
+        scale = 1400.0 / longest
+        gray = cv2.resize(
+            gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC
+        )
+
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    threshold = cv2.adaptiveThreshold(
-        enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-    )
-    denoised = cv2.fastNlMeansDenoising(threshold, h=10)
-    return denoised
+    return clahe.apply(gray)
 
 
-def extract_text(preprocessed_image) -> list[dict]:
-    """Extrae bloques de texto con su confianza usando EasyOCR."""
+def extract_text(image_for_ocr) -> list[dict]:
+    """Extrae bloques de texto con su confianza **y su caja** (geometría)."""
     reader = _get_reader()
-    results = reader.readtext(preprocessed_image, detail=1)
-    return [
-        {"text": text, "confidence": float(conf)}
-        for (_, text, conf) in results
-        if conf > 0.40
-    ]
+    results = reader.readtext(image_for_ocr, detail=1)
+
+    blocks: list[dict] = []
+    for bbox, text, conf in results:
+        # Umbral algo más bajo que antes (0.40): los números pequeños de la
+        # tabla suelen tener menor confianza y no queremos descartarlos.
+        if conf < 0.30:
+            continue
+        xs = [float(p[0]) for p in bbox]
+        ys = [float(p[1]) for p in bbox]
+        blocks.append(
+            {
+                "text": text,
+                "confidence": float(conf),
+                "x0": min(xs),
+                "cy": sum(ys) / len(ys),
+                "h": max(ys) - min(ys),
+            }
+        )
+    return blocks
 
 
-def parse_nutrients(text_blocks: list[dict]) -> NutrientInfo:
-    """Parsea el texto OCR a un :class:`NutrientInfo` con regex por nutriente."""
-    full_text = " ".join(b["text"].lower() for b in text_blocks)
+def _group_into_rows(blocks: list[dict]) -> list[str]:
+    """Reconstruye las filas visuales agrupando bloques por su centro ``y``.
+
+    Devuelve el texto de cada fila ordenado de izquierda a derecha. Así "Sodio"
+    y "120 mg" quedan juntos en la misma cadena y el regex los empareja bien.
+    """
+    if not blocks:
+        return []
+
+    heights = sorted(b["h"] for b in blocks if b["h"] > 0)
+    median_h = heights[len(heights) // 2] if heights else 10.0
+    tol = max(8.0, median_h * 0.6)  # tolerancia vertical para "misma fila"
+
+    rows: list[dict] = []
+    for b in sorted(blocks, key=lambda b: b["cy"]):
+        target = next((r for r in rows if abs(b["cy"] - r["cy"]) <= tol), None)
+        if target is None:
+            rows.append({"cy": b["cy"], "blocks": [b]})
+        else:
+            target["blocks"].append(b)
+            target["cy"] = sum(x["cy"] for x in target["blocks"]) / len(target["blocks"])
+
+    row_texts: list[str] = []
+    for row in rows:
+        ordered = sorted(row["blocks"], key=lambda b: b["x0"])
+        row_texts.append(" ".join(b["text"] for b in ordered))
+    return row_texts
+
+
+def parse_nutrients(blocks: list[dict]) -> NutrientInfo:
+    """Parsea los nutrientes usando primero las filas y luego el texto completo."""
+    rows = _group_into_rows(blocks)
+    full_text = " ".join(b["text"] for b in blocks)
     values: dict = {}
 
     for field, pattern in PATTERNS.items():
-        match = re.search(pattern, full_text, re.IGNORECASE)
-        if match:
-            values[field] = float(match.group(1).replace(",", "."))
+        # Para grasa total ignoramos las filas de saturadas, que comparten la
+        # palabra "grasa" y, si no, robarían el valor.
+        candidate_rows = (
+            [r for r in rows if "satur" not in r.lower()]
+            if field == "grasas_totales_g"
+            else rows
+        )
 
+        # Paso 1: buscar dentro de cada fila visual (empareja etiqueta↔valor).
+        for row in candidate_rows:
+            match = re.search(pattern, row, re.IGNORECASE)
+            if match:
+                values[field] = float(match.group(1).replace(",", "."))
+                break
+
+        # Paso 2 (respaldo): buscar en todo el texto si la fila no lo encontró.
+        if field not in values:
+            haystack = full_text
+            if field == "grasas_totales_g":
+                # Evita capturar el número de "grasas saturadas" en el blob.
+                haystack = re.sub(
+                    r"grasas?\s*saturad\w*[^a-z0-9]*\d+(?:[.,]\d+)?",
+                    " ",
+                    full_text,
+                    flags=re.IGNORECASE,
+                )
+            match = re.search(pattern, haystack, re.IGNORECASE)
+            if match:
+                values[field] = float(match.group(1).replace(",", "."))
+
+    # Caso "250 kcal" (el número va antes de la unidad): respaldo dedicado.
+    if "calorias" not in values:
+        match = re.search(r"(\d+(?:[.,]\d+)?)\s*kcal", full_text, re.IGNORECASE)
+        if match:
+            values["calorias"] = float(match.group(1).replace(",", "."))
+
+    # Ingredientes: desde "ingredientes:" hasta el siguiente punto / fin.
     ingredientes: list[str] = []
     ing_match = re.search(r"ingredientes?[:\s]+(.+?)(?:\.|$)", full_text, re.IGNORECASE)
     if ing_match:
