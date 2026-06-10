@@ -22,6 +22,16 @@ FROM python:3.11-slim AS production
 
 WORKDIR /app
 
+# Hilos a 1 por librería numérica: TensorFlow (CNN del modo "plato") y PyTorch
+# (EasyOCR del modo "etiqueta") comparten el mismo proceso y sus runtimes de
+# OpenMP chocaban al paralelizar sobre la CPU → SIGSEGV (signal 11). Forzar
+# single-thread evita el crash; el costo es un OCR algo más lento.
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    KMP_DUPLICATE_LIB_OK=TRUE
+
 # Librerías de runtime para OpenCV (libGL) + curl para el healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -31,6 +41,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Dependencias Python instaladas en la etapa builder
 COPY --from=builder /install/packages /usr/local
+
+# Pre-descarga los modelos de EasyOCR (detección CRAFT + reconocimiento latin) a
+# la imagen, para que el primer escaneo de etiqueta no los baje (~100 MB) en cada
+# cold start. Depende solo de los paquetes → la capa se cachea entre builds.
+RUN python -c "import easyocr; easyocr.Reader(['es', 'en'], gpu=False, verbose=False)"
 
 # Código fuente
 COPY app/ ./app/

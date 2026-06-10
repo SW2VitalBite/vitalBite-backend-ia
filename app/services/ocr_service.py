@@ -17,11 +17,16 @@ perezosa dentro de las funciones para que el microservicio arranque aunque no
 estén instaladas. Si faltan, se lanza :class:`ModelNotLoadedError` (→ 503).
 """
 
+import asyncio
+import multiprocessing
 import re
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 from app.core.exceptions import ModelNotLoadedError
 from app.core.logging import get_logger
 from app.schemas.food_scan import NutrientInfo
+from app.services.ocr_worker import run_ocr_blocks
 
 logger = get_logger("ocr")
 
@@ -40,81 +45,31 @@ PATTERNS = {
     "fibra_g": r"(?:fibra|fiber|fibre)[^\d]*" + _NUM,
 }
 
-# Cache del lector EasyOCR (su inicialización es costosa)
-_reader = None
+# ── Aislamiento del OCR en un subproceso ────────────────────────────────────
+# EasyOCR (PyTorch) y TensorFlow no pueden convivir en el mismo proceso (SIGSEGV,
+# ver app/services/ocr_worker.py). Ejecutamos el OCR en un pool de UN proceso
+# hijo lanzado con ``spawn`` (intérprete limpio, sin TF). El worker queda vivo y
+# reutiliza el lector EasyOCR entre peticiones.
+_executor: ProcessPoolExecutor | None = None
 
 
-def _get_reader():
-    """Inicializa (una vez) el lector EasyOCR en español + inglés."""
-    global _reader
-    if _reader is None:
-        try:
-            import easyocr  # import perezoso
-        except ImportError as exc:  # pragma: no cover
-            raise ModelNotLoadedError(
-                "easyocr", "instale easyocr para habilitar el OCR de etiquetas"
-            ) from exc
-        logger.info("inicializando lector EasyOCR (es, en)")
-        # verbose=False evita la barra de progreso (carácter █) que rompe la
-        # consola cp1252 de Windows y ensucia los logs JSON.
-        _reader = easyocr.Reader(["es", "en"], gpu=False, verbose=False)
-    return _reader
+def _get_executor() -> ProcessPoolExecutor:
+    global _executor
+    if _executor is None:
+        # ``spawn`` (no ``fork``): el hijo NO hereda la memoria del padre, así no
+        # arrastra TensorFlow. max_workers=1 serializa el OCR (1 inferencia a la
+        # vez) y mantiene un único worker caliente con el modelo cargado.
+        ctx = multiprocessing.get_context("spawn")
+        _executor = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+    return _executor
 
 
-def preprocess_for_ocr(image):
-    """Realza la etiqueta antes del OCR: escalado + contraste local (CLAHE).
-
-    A diferencia de un umbral binario duro, CLAHE conserva la forma de los
-    trazos, que es lo que mejor lee el reconocedor neuronal de EasyOCR. El
-    escalado ayuda a leer los números pequeños de la tabla.
-    """
-    try:
-        import cv2
-        import numpy as np
-    except ImportError as exc:  # pragma: no cover
-        raise ModelNotLoadedError(
-            "opencv", "instale opencv-python-headless para el preprocesamiento OCR"
-        ) from exc
-
-    img_array = np.array(image.convert("RGB"))
-    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-
-    # Escalar imágenes pequeñas (números de la tabla quedan más legibles)
-    h, w = gray.shape[:2]
-    longest = max(h, w)
-    if longest < 1400:
-        scale = 1400.0 / longest
-        gray = cv2.resize(
-            gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC
-        )
-
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    return clahe.apply(gray)
-
-
-def extract_text(image_for_ocr) -> list[dict]:
-    """Extrae bloques de texto con su confianza **y su caja** (geometría)."""
-    reader = _get_reader()
-    results = reader.readtext(image_for_ocr, detail=1)
-
-    blocks: list[dict] = []
-    for bbox, text, conf in results:
-        # Umbral algo más bajo que antes (0.40): los números pequeños de la
-        # tabla suelen tener menor confianza y no queremos descartarlos.
-        if conf < 0.30:
-            continue
-        xs = [float(p[0]) for p in bbox]
-        ys = [float(p[1]) for p in bbox]
-        blocks.append(
-            {
-                "text": text,
-                "confidence": float(conf),
-                "x0": min(xs),
-                "cy": sum(ys) / len(ys),
-                "h": max(ys) - min(ys),
-            }
-        )
-    return blocks
+def _reset_executor() -> None:
+    """Descarta el pool tras un fallo del worker para recrearlo en la próxima."""
+    global _executor
+    if _executor is not None:
+        _executor.shutdown(wait=False, cancel_futures=True)
+        _executor = None
 
 
 def _group_into_rows(blocks: list[dict]) -> list[str]:
@@ -209,10 +164,27 @@ def calculate_ocr_confidence(text_blocks: list[dict], parsed: NutrientInfo) -> f
     return min(1.0, avg_word_conf + field_bonus)
 
 
-def extract_nutritional_data(image) -> tuple[NutrientInfo, float]:
-    """Pipeline OCR completo: imagen PIL → (NutrientInfo, confianza)."""
-    preprocessed = preprocess_for_ocr(image)
-    blocks = extract_text(preprocessed)
+async def extract_nutritional_data(image) -> tuple[NutrientInfo, float]:
+    """Pipeline OCR completo: imagen PIL → (NutrientInfo, confianza).
+
+    El preprocesado + EasyOCR corren en el subproceso aislado; el agrupamiento en
+    filas y el parseo (regex) se hacen aquí en el proceso padre.
+    """
+    import numpy as np
+
+    rgb_array = np.asarray(image.convert("RGB"))
+    loop = asyncio.get_event_loop()
+    try:
+        blocks = await loop.run_in_executor(_get_executor(), run_ocr_blocks, rgb_array)
+    except BrokenProcessPool as exc:
+        # El worker murió (p. ej. SIGSEGV). Se recrea el pool para la próxima y
+        # se devuelve 503 sin tumbar el proceso principal (plato/RF/health siguen).
+        _reset_executor()
+        logger.error("el worker de OCR terminó inesperadamente", extra={"error": str(exc)})
+        raise ModelNotLoadedError(
+            "easyocr", "el worker de OCR terminó inesperadamente; reintente"
+        ) from exc
+
     nutrients = parse_nutrients(blocks)
     confidence = calculate_ocr_confidence(blocks, nutrients)
     logger.info(

@@ -60,7 +60,7 @@ async def analyze_and_evaluate(
     food_classes: list[str] = []
 
     if mode == ScanMode.LABEL:
-        nutrients, confianza = ocr_service.extract_nutritional_data(image)
+        nutrients, confianza = await ocr_service.extract_nutritional_data(image)
     else:  # ScanMode.PLATE
         predicciones, confianza = food_classification_service.classify_food(image)
         food_classes = [p.clase for p in predicciones]

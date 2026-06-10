@@ -37,7 +37,7 @@ steps:
       - '--region=${_REGION}'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--memory=4Gi'
+      - '--memory=8Gi'
       - '--cpu=2'
       - '--port=8080'
       - '--timeout=300'
